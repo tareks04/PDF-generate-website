@@ -6,8 +6,6 @@ A browser-based web edition of the Android app in [tareks04/PDF-generate](https:
 
 ## Live website
 
-After GitHub Pages deployment, the website URL is:
-
 https://tareks04.github.io/PDF-generate-website/
 
 ## Features
@@ -21,14 +19,21 @@ https://tareks04.github.io/PDF-generate-website/
 - JSON backup import/export compatible with Android `smart_page_library_backup` version 1.
 - Browser Local Storage for the library.
 
+## Fixing "Failed to fetch" / CORS errors
+
+GitHub Pages is a static frontend. It cannot read image bytes from a third-party host unless that host permits CORS. Deploy the allowlist-based Cloudflare Worker in [relay/worker.js](relay/worker.js), then follow the [relay setup guide](relay/README.md).
+
+Once deployed, paste the Worker URL into **Website → Settings → Optional Relay Endpoint URL**, save it, and click **Test Relay**. Add each image hostname (and any redirect/CDN hostname) to the Worker variable `ALLOWED_DOMAINS`. The default allowed browser origin is `https://tareks04.github.io`.
+
 ## GitHub Pages deployment
 
-The repository includes `.github/workflows/pages.yml`. In **Settings → Pages**, choose **GitHub Actions** as the source. Each push to `main` (or a manual workflow run) deploys `index.html` from the repository root.
+The repository includes a GitHub Actions workflow at `.github/workflows/static.yml`. GitHub Pages should use **GitHub Actions** as its deployment source. Each push to `main` deploys `index.html` from the repository root.
 
 ## Important limitations
 
 - Library data is stored in the current browser's Local Storage. It does not automatically synchronize across devices or browsers. Use JSON backup to move data.
-- Browser CORS rules can block requests to image hosts. A relay endpoint can be configured in Settings, but you must deploy and secure that relay separately. It should allow only trusted image domains; do not use an unrestricted open proxy.
+- The relay only fetches hostnames explicitly listed in its allowlist; it is not an unrestricted public proxy.
+- The relay cannot make private, password-protected, expired, unavailable, or otherwise blocked upstream images accessible.
 - PDF generation uses the PDF-Lib browser build from jsDelivr, so an internet connection is needed to load that library.
-- The generated PDF stops on the first page-fetch or validation failure. It will not silently omit failed pages.
-- This is a standalone web implementation; Android-only native print and file picker APIs have been replaced with browser download, preview and print workflows.
+- PDF generation stops on the first page-fetch or validation failure. It will not silently omit failed pages.
+- This is a standalone web implementation; Android-only native print and file picker APIs are replaced with browser download, preview, and print workflows.
