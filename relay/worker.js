@@ -88,9 +88,8 @@ async function fetchImage(startUrl, env) {
   for (let redirects = 0; redirects <= MAX_REDIRECTS; redirects++) {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort("Upstream timeout"), TIMEOUT_MS);
-    let upstream;
     try {
-      upstream = await fetch(target.toString(), {
+      const upstream = await fetch(target.toString(), {
         method: "GET",
         redirect: "manual",
         signal: controller.signal,
@@ -99,61 +98,62 @@ async function fetchImage(startUrl, env) {
           "User-Agent": "SmartPageLibrary-Relay/1.0",
         },
       });
+
+      if ([301, 302, 303, 307, 308].includes(upstream.status)) {
+        const location = upstream.headers.get("Location");
+        if (!location) return { error: "Upstream redirect has no Location header", status: 502 };
+        if (redirects === MAX_REDIRECTS) return { error: "Too many upstream redirects", status: 502 };
+        target = validateTarget(new URL(location, target).toString(), env);
+        continue;
+      }
+
+      if (!upstream.ok) {
+        return { error: "Upstream HTTP " + upstream.status, status: upstream.status };
+      }
+
+      const contentType = (upstream.headers.get("Content-Type") || "").toLowerCase();
+      if (contentType.includes("text/html") || contentType.includes("application/json") || contentType.startsWith("text/")) {
+        return { error: "Upstream returned text/HTML instead of an image", status: 422 };
+      }
+
+      const length = Number(upstream.headers.get("Content-Length") || 0);
+      if (length > MAX_BYTES) return { error: "Image exceeds 25 MB limit", status: 413 };
+      if (!upstream.body) return { error: "Empty upstream response", status: 422 };
+
+      const reader = upstream.body.getReader();
+      const chunks = [];
+      let total = 0;
+      try {
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          total += value.byteLength;
+          if (total > MAX_BYTES) {
+            await reader.cancel().catch(() => {});
+            return { error: "Image exceeds 25 MB limit", status: 413 };
+          }
+          chunks.push(value);
+        }
+      } finally {
+        reader.releaseLock();
+      }
+
+      const bytes = new Uint8Array(total);
+      let offset = 0;
+      for (const chunk of chunks) {
+        bytes.set(chunk, offset);
+        offset += chunk.byteLength;
+      }
+
+      // The web app and Android app both validate JPEG magic bytes.
+      if (bytes.length < 3 || bytes[0] !== 0xff || bytes[1] !== 0xd8 || bytes[2] !== 0xff) {
+        return { error: "Response is not a valid JPEG (missing FF D8 FF)", status: 422 };
+      }
+      return { bytes, status: 200 };
     } finally {
+      // Keep the timeout active while the upstream response body is streaming.
       clearTimeout(timer);
     }
-
-    if ([301, 302, 303, 307, 308].includes(upstream.status)) {
-      const location = upstream.headers.get("Location");
-      if (!location) return { error: "Upstream redirect has no Location header", status: 502 };
-      if (redirects === MAX_REDIRECTS) return { error: "Too many upstream redirects", status: 502 };
-      target = validateTarget(new URL(location, target).toString(), env);
-      continue;
-    }
-
-    if (!upstream.ok) {
-      return { error: "Upstream HTTP " + upstream.status, status: upstream.status };
-    }
-
-    const contentType = (upstream.headers.get("Content-Type") || "").toLowerCase();
-    if (contentType.includes("text/html") || contentType.includes("application/json") || contentType.startsWith("text/")) {
-      return { error: "Upstream returned text/HTML instead of an image", status: 422 };
-    }
-
-    const length = Number(upstream.headers.get("Content-Length") || 0);
-    if (length > MAX_BYTES) return { error: "Image exceeds 25 MB limit", status: 413 };
-    if (!upstream.body) return { error: "Empty upstream response", status: 422 };
-
-    const reader = upstream.body.getReader();
-    const chunks = [];
-    let total = 0;
-    try {
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        total += value.byteLength;
-        if (total > MAX_BYTES) {
-          await reader.cancel();
-          return { error: "Image exceeds 25 MB limit", status: 413 };
-        }
-        chunks.push(value);
-      }
-    } finally {
-      reader.releaseLock();
-    }
-
-    const bytes = new Uint8Array(total);
-    let offset = 0;
-    for (const chunk of chunks) {
-      bytes.set(chunk, offset);
-      offset += chunk.byteLength;
-    }
-
-    // The web app and Android app both validate JPEG magic bytes.
-    if (bytes.length < 3 || bytes[0] !== 0xff || bytes[1] !== 0xd8 || bytes[2] !== 0xff) {
-      return { error: "Response is not a valid JPEG (missing FF D8 FF)", status: 422 };
-    }
-    return { bytes, status: 200 };
   }
   return { error: "Upstream redirect limit reached", status: 502 };
 }
@@ -201,7 +201,7 @@ export default {
       });
     } catch (error) {
       const message = error instanceof Error ? error.message : "Relay failure";
-      const status = message === "Image host is not in ALLOWED_DOMAINS" ? 403 : 400;
+      const status = message === "Image host is not in ALLOWED_DOMAINS" ? 403 : (error?.name === "AbortError" || /timeout/i.test(message) ? 504 : 502);
       return json({ error: message }, status, headers);
     }
   },
